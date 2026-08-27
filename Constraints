@@ -1,0 +1,221 @@
+###############################################################################
+# asic.sdc — I2C input timing constraints
+#
+# Assumptions:
+#   scl       : I2C serial clock input
+#   sda_in    : I2C serial-data input
+#
+#   start_reg : flip-flop clocked by negedge sda_in
+#               captures the SCL qualifier at start_reg/D
+#
+#   stop_reg  : flip-flop clocked by posedge sda_in
+#               captures the SCL qualifier at stop_reg/D
+#
+# I2C conditions:
+#   START = SDA falling edge while SCL is high
+#   STOP  = SDA rising edge while SCL is high
+#
+# Time unit: ns
+###############################################################################
+
+###############################################################################
+# I2C periods and waveforms
+###############################################################################
+
+# 400 kHz SCL
+set SCL_PERIOD       2500.0
+set SCL_HIGH_TIME    1250.0
+
+# SDA is modeled as an event clock.  It is twice SCL period:
+#   posedge SDA: STOP detector event
+#   negedge SDA: START detector event
+set SDA_PERIOD       [expr {2.0 * $SCL_PERIOD}]
+set SDA_HIGH_TIME    [expr {$SDA_PERIOD / 2.0}]
+
+###############################################################################
+# I2C timing requirements / environment assumptions
+###############################################################################
+
+# Normal I2C SDA-data timing relative to SCL.
+# Update with your interface/board timing budget if needed.
+set TSU_DAT_MIN        100.0
+set THD_DAT_MIN          0.0
+set SDA_DLYMAX_VS_SCL  [expr {$SCL_PERIOD - $TSU_DAT_MIN}]
+
+# START condition:
+# SCL is stable 600 ns before SDA falls and 600 ns after SDA falls.
+set TSU_START          600.0
+set THD_START          600.0
+
+# STOP condition:
+# SCL is stable 600 ns before SDA rises and 600 ns after SDA rises.
+set TSU_STOP           600.0
+set THD_STOP           600.0
+
+###############################################################################
+# Clock creation
+###############################################################################
+
+# Normal SCL clock for standard I2C data/address/ACK reception.
+create_clock \
+    -name SCL_CLK \
+    -period $SCL_PERIOD \
+    -waveform [list 0.0 $SCL_HIGH_TIME] \
+    [get_ports scl]
+
+# SDA is a clock only for the dedicated edge-detector registers.
+#
+# Rising SDA at 0 ns     -> stop_reg
+# Falling SDA at 2500 ns -> start_reg
+create_clock \
+    -name SDA_CLK \
+    -period $SDA_PERIOD \
+    -waveform [list 0.0 $SDA_HIGH_TIME] \
+    [get_ports sda_in]
+
+###############################################################################
+# Generic SCL/SDA CDC relationship
+###############################################################################
+
+# SDA and SCL are protocol related, but they are not phase-locked periodic
+# clocks.  Disable generic synchronous timing checks between their domains.
+#
+# Explicit SCL -> start_reg/D and SCL -> stop_reg/D requirements appear below.
+set_clock_groups -asynchronous \
+    -group [get_clocks SCL_CLK] \
+    -group [get_clocks SDA_CLK]
+
+###############################################################################
+# Normal SDA input-data constraints
+###############################################################################
+
+# Normal I2C data path:
+# sda_in is sampled by logic clocked from SCL_CLK.
+#
+# The delay is intentionally defined relative to SCL_CLK, because this is
+# ordinary address/data/RW/ACK sampling—not start/stop edge detection.
+set_input_delay \
+    -clock SCL_CLK \
+    -max $SDA_DLYMAX_VS_SCL \
+    [get_ports sda_in]
+
+set_input_delay \
+    -clock SCL_CLK \
+    -min $THD_DAT_MIN \
+    [get_ports sda_in]
+
+###############################################################################
+# Exclude start/stop D pins from ordinary SDA input-delay analysis
+###############################################################################
+
+# sda_in is the clock, rather than the data, for start_reg and stop_reg.
+# Hence do not apply regular SCL-referenced SDA input delay to these endpoints.
+#
+# If your registers are hierarchical, use e.g.:
+#   [get_pins -hierarchical */start_reg/D]
+#   [get_pins -hierarchical */stop_reg/D]
+set_false_path \
+    -from [get_ports sda_in] \
+    -to [get_pins {start_reg/D stop_reg/D}]
+
+###############################################################################
+# START timing: SDA falling edge clocks start_reg
+###############################################################################
+
+# Requirement before START:
+# SCL must be stable for 600 ns before falling SDA.
+#
+# SCL -> start_reg/D must meet 600 ns maximum delay.
+set_max_delay \
+    $TSU_START \
+    -from [get_ports scl] \
+    -to [get_pins start_reg/D]
+
+# Requirement after START:
+# SCL must remain stable for 600 ns after falling SDA.
+#
+# Approximate this with a minimum SCL -> start_reg/D delay requirement.
+set_min_delay \
+    $THD_START \
+    -from [get_ports scl] \
+    -to [get_pins start_reg/D]
+
+###############################################################################
+# STOP timing: SDA rising edge clocks stop_reg
+###############################################################################
+
+# Requirement before STOP:
+# SCL must be stable for 600 ns before rising SDA.
+#
+# SCL -> stop_reg/D must meet 600 ns maximum delay.
+set_max_delay \
+    $TSU_STOP \
+    -from [get_ports scl] \
+    -to [get_pins stop_reg/D]
+
+# Requirement after STOP:
+# SCL must remain stable for 600 ns after rising SDA.
+#
+# Approximate this with a minimum SCL -> stop_reg/D delay requirement.
+set_min_delay \
+    $THD_STOP \
+    -from [get_ports scl] \
+    -to [get_pins stop_reg/D]
+
+###############################################################################
+# Synthesis preservation
+###############################################################################
+
+# Constraint visible in your original screenshot.
+set_dont_touch [get_cells u_sda_in_dat_buf]
+
+###############################################################################
+# Optional electrical IO assumptions
+###############################################################################
+
+# Uncomment only if these are valid in your design flow / library methodology.
+#
+# set_input_transition 5.0 [get_ports {scl sda_in}]
+# set_drive 0 [get_ports {scl sda_in}]
+
+###############################################################################
+# Reports for validation
+###############################################################################
+
+report_clocks
+report_clock -attributes
+
+# Confirm actual endpoint names before sign-off:
+get_pins start_reg/D
+get_pins stop_reg/D
+
+# Confirm that SDA is the clock source:
+# Replace CK by CP or CLK if that is the actual library clock pin.
+report_timing -to [get_pins start_reg/CK] -max_paths 5
+report_timing -to [get_pins stop_reg/CK]  -max_paths 5
+
+# START setup / hold-equivalent checks
+report_timing \
+    -from [get_ports scl] \
+    -to [get_pins start_reg/D] \
+    -delay_type max \
+    -max_paths 5
+
+report_timing \
+    -from [get_ports scl] \
+    -to [get_pins start_reg/D] \
+    -delay_type min \
+    -max_paths 5
+
+# STOP setup / hold-equivalent checks
+report_timing \
+    -from [get_ports scl] \
+    -to [get_pins stop_reg/D] \
+    -delay_type max \
+    -max_paths 5
+
+report_timing \
+    -from [get_ports scl] \
+    -to [get_pins stop_reg/D] \
+    -delay_type min \
+    -max_paths 5
